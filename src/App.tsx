@@ -125,6 +125,7 @@ export default function App() {
         handleEnterChatDM={handleEnterChatDM}
         handleEnterChatGroup={handleEnterChatGroup}
         fetchUnread={fetchUnread}
+        socket={socketRef.current}
       />
     </Router>
   );
@@ -133,7 +134,8 @@ export default function App() {
 function AppContent({ 
   user, notification, setNotification, totalUnread, 
   handleLogin, handleLogout, handleUpdateUser, 
-  handleEnterList, handleEnterChatDM, handleEnterChatGroup, fetchUnread 
+  handleEnterList, handleEnterChatDM, handleEnterChatGroup, fetchUnread,
+  socket
 }: any) {
   const navigate = useNavigate();
 
@@ -159,15 +161,15 @@ function AppContent({
         <Route path="/signup" element={user ? <Navigate to="/chats" /> : <Signup onLogin={handleLogin} />} />
         
         <Route path="/chats" element={
-          user ? <ChatList user={user} onLogout={handleLogout} onUpdateUser={handleUpdateUser} totalUnread={totalUnread} onEnterList={handleEnterList} /> : <Navigate to="/login" />
+          user ? <ChatList user={user} onLogout={handleLogout} onUpdateUser={handleUpdateUser} totalUnread={totalUnread} onEnterList={handleEnterList} socket={socket} /> : <Navigate to="/login" />
         } />
         
         <Route path="/chat/:id" element={
-          user ? <ChatThread user={user} onEnterChat={handleEnterChatDM} onRefreshUnread={fetchUnread} /> : <Navigate to="/login" />
+          user ? <ChatThread user={user} onEnterChat={handleEnterChatDM} onRefreshUnread={fetchUnread} socket={socket} /> : <Navigate to="/login" />
         } />
         
         <Route path="/group/:id" element={
-          user ? <ChatThread user={user} onEnterChat={handleEnterChatGroup} onRefreshUnread={fetchUnread} /> : <Navigate to="/login" />
+          user ? <ChatThread user={user} isGroup onEnterChat={handleEnterChatGroup} onRefreshUnread={fetchUnread} socket={socket} /> : <Navigate to="/login" />
         } />
       </Routes>
     </div>

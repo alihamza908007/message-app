@@ -13,12 +13,13 @@ interface ChatThreadProps {
   user: User;
   onEnterChat?: (id: string) => void;
   onRefreshUnread?: () => void;
+  socket: Socket | null;
+  isGroup?: boolean;
 }
 
-export default function ChatThread({ user, onEnterChat, onRefreshUnread }: ChatThreadProps) {
+export default function ChatThread({ user, onEnterChat, onRefreshUnread, socket, isGroup = false }: ChatThreadProps) {
   const { id } = useParams();
   const navigate = useNavigate();
-  const isGroup = window.location.pathname.startsWith('/group/');
 
   const [otherUser, setOtherUser] = useState<any>(null); // Can be User or Group
   const [messages, setMessages] = useState<Message[]>([]);
@@ -236,16 +237,14 @@ export default function ChatThread({ user, onEnterChat, onRefreshUnread }: ChatT
   }, [id, isGroup, navigate, onEnterChat]);
 
   useEffect(() => {
-    socketRef.current = io(window.location.origin.replace('5173', '3000'), {
-      transports: ['websocket']
-    });
+    if (!socket || !id) return;
 
-    socketRef.current.emit('join', user.id);
+    socket.emit('join', user.id);
     if (isGroup) {
-      socketRef.current.emit('join_group', Number(id));
+      socket.emit('join_group', Number(id));
     }
 
-    socketRef.current.on('receive_message', (message: Message) => {
+    const handleReceiveMessage = (message: Message) => {
       const isRelevant = isGroup
         ? message.group_id === Number(id)
         : (message.sender_id === Number(id) && !message.group_id);
@@ -254,16 +253,26 @@ export default function ChatThread({ user, onEnterChat, onRefreshUnread }: ChatT
         setMessages(prev => [...prev, message]);
         markRead();
       }
-    });
+    };
 
-    socketRef.current.on('message_sent', (message: Message) => {
-      setMessages(prev => [...prev, message]);
-    });
+    const handleMessageSent = (message: Message) => {
+      const isRelevant = isGroup
+        ? message.group_id === Number(id)
+        : (message.receiver_id === Number(id) && !message.group_id);
+      
+      if (isRelevant) {
+        setMessages(prev => [...prev, message]);
+      }
+    };
+
+    socket.on('receive_message', handleReceiveMessage);
+    socket.on('message_sent', handleMessageSent);
 
     return () => {
-      socketRef.current?.disconnect();
+      socket.off('receive_message', handleReceiveMessage);
+      socket.off('message_sent', handleMessageSent);
     };
-  }, [id, user.id, isGroup]);
+  }, [id, user.id, isGroup, socket]);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -271,10 +280,10 @@ export default function ChatThread({ user, onEnterChat, onRefreshUnread }: ChatT
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || !socketRef.current) return;
+    if (!input.trim() || !socket) return;
     if (isGroup && otherUser?.status === 'pending') return;
 
-    socketRef.current.emit('send_message', {
+    socket.emit('send_message', {
       senderId: user.id,
       receiverId: isGroup ? null : Number(id),
       groupId: isGroup ? Number(id) : null,

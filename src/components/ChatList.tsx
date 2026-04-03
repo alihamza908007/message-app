@@ -9,6 +9,7 @@ import GroupModal from './GroupModal';
 
 interface ChatListProps {
   user: User;
+  socket: Socket | null;
   onLogout: () => void;
   onUpdateUser: (user: User) => void;
   totalUnread?: number;
@@ -17,7 +18,7 @@ interface ChatListProps {
 
 type Tab = 'chats' | 'friends' | 'search';
 
-export default function ChatList({ user, onLogout, onUpdateUser, totalUnread = 0, onEnterList }: ChatListProps) {
+export default function ChatList({ user, socket, onLogout, onUpdateUser, totalUnread = 0, onEnterList }: ChatListProps) {
   const [activeTab, setActiveTab] = useState<Tab>('chats');
   const [chats, setChats] = useState<Chat[]>([]);
   const [friends, setFriends] = useState<Friendship[]>([]);
@@ -59,15 +60,12 @@ export default function ChatList({ user, onLogout, onUpdateUser, totalUnread = 0
     fetchChats();
     fetchFriends();
 
-    const socket = io(window.location.origin.replace('5173', '3000'), {
-      transports: ['websocket']
-    });
+    if (!socket) return;
 
     socket.emit('join', user.id);
 
-    socket.on('receive_message', (message: Message) => {
+    const handleReceiveMessage = (message: Message) => {
       setChats(prev => {
-        // ... (existing logic)
         const chatExists = prev.find(c => 
           message.group_id ? (c.chat_type === 'group' && c.id === message.group_id) : (c.chat_type === 'dm' && c.id === message.sender_id)
         );
@@ -97,9 +95,9 @@ export default function ChatList({ user, onLogout, onUpdateUser, totalUnread = 0
           return prev;
         }
       });
-    });
+    };
 
-    socket.on('messages_read', ({ otherUserId, groupId }) => {
+    const handleMessagesRead = ({ otherUserId, groupId }: any) => {
       setChats(prev => prev.map(chat => {
         const isMatch = groupId 
           ? (chat.chat_type === 'group' && chat.id === groupId)
@@ -110,10 +108,16 @@ export default function ChatList({ user, onLogout, onUpdateUser, totalUnread = 0
         }
         return chat;
       }));
-    });
+    };
 
-    return () => { socket.disconnect(); };
-  }, [user.id, activeTab]);
+    socket.on('receive_message', handleReceiveMessage);
+    socket.on('messages_read', handleMessagesRead);
+
+    return () => {
+      socket.off('receive_message', handleReceiveMessage);
+      socket.off('messages_read', handleMessagesRead);
+    };
+  }, [user.id, activeTab, socket]);
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
