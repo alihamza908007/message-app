@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, Plus, MessageSquare, Users, User as UserIcon, LogOut, Check, X, UserSearch, Loader2, Send } from 'lucide-react';
+import { Search, Plus, MessageSquare, Users, User as UserIcon, LogOut, Check, X, UserSearch, Loader2, Send, Trash2 } from 'lucide-react';
 import { User, Chat, Friendship } from '../types';
 import ProfileModal from './ProfileModal';
 
@@ -116,6 +116,21 @@ export default function ChatList({ user, onLogout, onUpdateUser }: ChatListProps
     } catch (err) { console.error(err); }
   };
 
+  const deleteChat = async (otherUserId: number) => {
+    if (!confirm('Are you sure you want to permanently delete this transmission log?')) return;
+    try {
+      const res = await fetch(`/api/messages/${otherUserId}`, {
+        method: 'DELETE',
+        headers: { 
+          'Authorization': `Bearer ${localStorage.getItem('neon_token')}` 
+        }
+      });
+      if (res.ok) {
+        fetchChats();
+      }
+    } catch (err) { console.error(err); }
+  };
+
   return (
     <div className="min-h-screen pb-32">
       <header className="fixed top-0 w-full z-40 bg-neon-bg/80 backdrop-blur-md border-b border-neon-pink/30 shadow-[inset_0_0_12px_rgba(255,45,120,0.1)] transition-all">
@@ -162,12 +177,11 @@ export default function ChatList({ user, onLogout, onUpdateUser }: ChatListProps
               )}
 
               {chats.map(chat => (
-                <Link 
-                  key={chat.id} 
-                  to={`/chat/${chat.id}`}
-                  className="group relative overflow-hidden bg-white/5 backdrop-blur-md p-4 rounded-xl border border-white/10 hover:border-neon-pink/30 transition-all duration-300 block"
-                >
-                  <div className="flex items-center gap-4">
+                <div key={chat.id} className="relative group overflow-hidden bg-white/5 backdrop-blur-md p-2 rounded-xl border border-white/10 hover:border-neon-pink/30 transition-all duration-300 flex items-center justify-between pr-3">
+                  <Link 
+                    to={`/chat/${chat.id}`}
+                    className="flex items-center gap-4 grow p-2 min-w-0 z-10"
+                  >
                     <div className="relative shrink-0">
                       <div className="w-14 h-14 rounded-lg overflow-hidden border border-white/10">
                         <img src={chat.avatar_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${chat.username}`} alt={chat.username} className="w-full h-full object-cover" />
@@ -176,15 +190,22 @@ export default function ChatList({ user, onLogout, onUpdateUser }: ChatListProps
                     <div className="grow min-w-0">
                       <div className="flex justify-between items-start mb-1">
                         <h3 className="font-headline font-bold text-white truncate">{chat.username}</h3>
-                        <span className="font-label text-[10px] text-white/40">
+                        <span className="font-label text-[10px] text-white/40 group-hover:hidden transition-all duration-300">
                           {chat.last_message_at ? new Date(chat.last_message_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ''}
                         </span>
                       </div>
-                      <p className="font-body text-sm text-white/60 truncate pr-4">{chat.last_message || 'Start transmission...'}</p>
+                      <p className="font-body text-sm text-white/60 truncate pr-4 group-hover:pr-10 transition-all duration-300">{chat.last_message || 'Start transmission...'}</p>
                     </div>
-                  </div>
-                  <div className="absolute inset-0 bg-linear-to-r from-neon-pink/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
-                </Link>
+                  </Link>
+                  <button 
+                      onClick={(e) => { e.preventDefault(); deleteChat(chat.id); }} 
+                      className="p-3 bg-neon-pink/5 text-neon-pink/60 rounded-lg border border-neon-pink/30 hover:bg-neon-pink hover:text-white hover:border-neon-pink transition-all flex items-center shrink-0 z-20"
+                      title="Clear Transmission Log"
+                  >
+                      <Trash2 size={16} />
+                  </button>
+                  <div className="absolute inset-0 bg-linear-to-r from-neon-pink/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"></div>
+                </div>
               ))}
             </motion.div>
           )}

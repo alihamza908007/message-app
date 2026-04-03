@@ -2,6 +2,8 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import path from 'path';
+import fs from 'fs';
+import multer from 'multer';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import pg from 'pg';
@@ -76,6 +78,22 @@ async function startServer() {
 
   app.use(express.json());
 
+  // Setup static uploads directory
+  const uploadsDir = path.join(__dirname, 'uploads');
+  if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+  app.use('/uploads', express.static(uploadsDir));
+
+  // Setup Multer
+  const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, uploadsDir),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname) || '';
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+      cb(null, uniqueSuffix + ext);
+    }
+  });
+  const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
+
   const JWT_SECRET = process.env.JWT_SECRET || 'neon-secret-key-2077';
 
   // Middleware
@@ -93,6 +111,12 @@ async function startServer() {
   };
 
   // Auth Routes
+  app.post('/api/upload', authenticate, upload.single('file'), (req: any, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const fileUrl = `/uploads/${req.file.filename}`;
+    res.json({ url: fileUrl });
+  });
+
   app.post('/api/auth/signup', async (req, res) => {
     const { username, email, password } = req.body;
     try {
@@ -261,8 +285,19 @@ async function startServer() {
       res.status(500).json({ error: 'Server error' });
     }
   });
-
   // Chats & Messages
+  app.delete('/api/messages/:otherUserId', authenticate, async (req: any, res) => {
+    try {
+      await pool.query(
+        'DELETE FROM messages WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1)',
+        [req.userId, req.params.otherUserId]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   app.get('/api/chats', authenticate, async (req: any, res) => {
     try {
       // Complex query to get user list with last message
