@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { ArrowLeft, Search, MoreVertical, Terminal, Download, Play, Mic, Smile, Paperclip, Image as ImageIcon, Gift, Send, Plus, Loader2, X, User as UserIcon, Trash2 } from 'lucide-react';
 import { User, Message } from '../types';
 import { io, Socket } from 'socket.io-client';
+import AudioPlayer from './AudioPlayer';
 
 interface ChatThreadProps {
   user: User;
@@ -338,7 +339,7 @@ export default function ChatThread({ user }: ChatThreadProps) {
                   <span className="font-label text-xs uppercase tracking-widest text-white truncate max-w-[150px]">Encrypted_Payload</span>
                 </a>
               ) : msg.type === 'voice' ? (
-                <audio controls src={msg.content} className="max-w-[250px] w-full h-10 opacity-90 rounded-full" />
+                <AudioPlayer src={msg.content} />
               ) : (
                 <p className="text-sm leading-relaxed text-white selection:bg-neon-cyan selection:text-neon-bg">{msg.content}</p>
               )}
