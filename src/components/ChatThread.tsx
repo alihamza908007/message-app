@@ -84,9 +84,11 @@ export default function ChatThread({ user }: ChatThreadProps) {
       mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
       
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const activeMimeType = mediaRecorder.mimeType || 'audio/webm';
+        const fileExt = activeMimeType.includes('mp4') ? 'mp4' : 'webm';
+        const audioBlob = new Blob(audioChunksRef.current, { type: activeMimeType });
         const formData = new FormData();
-        formData.append('file', audioBlob, 'voicenote.webm');
+        formData.append('file', audioBlob, `voicenote.${fileExt}`);
         setUploading(true);
         try {
           const res = await fetch('/api/upload', {
