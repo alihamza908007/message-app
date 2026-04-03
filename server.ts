@@ -31,23 +31,54 @@ async function initDb() {
     console.log('Connected to PostgreSQL');
     
     await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
+      CREATE TABLE IF NOT EXISTS groups (
         id SERIAL PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
+        name TEXT NOT NULL,
+        creator_id INTEGER REFERENCES users(id),
         avatar_url TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
-      
+
+      CREATE TABLE IF NOT EXISTS group_members (
+        id SERIAL PRIMARY KEY,
+        group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        status TEXT DEFAULT 'pending', -- pending, accepted
+        role TEXT DEFAULT 'member',   -- member, admin
+        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(group_id, user_id)
+      );
+
       CREATE TABLE IF NOT EXISTS messages (
         id SERIAL PRIMARY KEY,
         sender_id INTEGER REFERENCES users(id),
         receiver_id INTEGER REFERENCES users(id),
+        group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE,
         content TEXT NOT NULL,
         type TEXT DEFAULT 'text',
+        is_read BOOLEAN DEFAULT false,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+
+      -- Ensure group_id column exists if table was previously created
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='messages' AND column_name='group_id') THEN
+          ALTER TABLE messages ADD COLUMN group_id INTEGER REFERENCES groups(id) ON DELETE CASCADE;
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='group_members' AND column_name='status') THEN
+          ALTER TABLE group_members ADD COLUMN status TEXT DEFAULT 'pending';
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='group_members' AND column_name='role') THEN
+          ALTER TABLE group_members ADD COLUMN role TEXT DEFAULT 'member';
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='messages' AND column_name='is_read') THEN
+          ALTER TABLE messages ADD COLUMN is_read BOOLEAN DEFAULT false;
+        END IF;
+      END $$;
 
       CREATE TABLE IF NOT EXISTS friendships (
         id SERIAL PRIMARY KEY,
@@ -285,6 +316,159 @@ async function startServer() {
       res.status(500).json({ error: 'Server error' });
     }
   });
+
+  // Groups
+  app.post('/api/groups', authenticate, async (req: any, res) => {
+    const { name, members } = req.body; // members is array of IDs
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const groupRes = await client.query(
+        'INSERT INTO groups (name, creator_id) VALUES ($1, $2) RETURNING *',
+        [name, req.userId]
+      );
+      const group = groupRes.rows[0];
+      
+      // Add creator as accepted admin
+      await client.query('INSERT INTO group_members (group_id, user_id, status, role) VALUES ($1, $2, \'accepted\', \'admin\')', [group.id, req.userId]);
+      
+      // Add other members as pending members
+      if (members && Array.isArray(members)) {
+        for (const mId of members) {
+          await client.query('INSERT INTO group_members (group_id, user_id, status, role) VALUES ($1, $2, \'pending\', \'member\') ON CONFLICT DO NOTHING', [group.id, mId]);
+        }
+      }
+      
+      await client.query('COMMIT');
+      res.json(group);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      res.status(500).json({ error: 'Server error' });
+    } finally {
+      client.release();
+    }
+  });
+
+  app.get('/api/groups/:id/messages', authenticate, async (req: any, res) => {
+    try {
+      // Membership check
+      const memberCheck = await pool.query('SELECT status FROM group_members WHERE group_id = $1 AND user_id = $2', [req.params.id, req.userId]);
+      if (memberCheck.rows.length === 0 || memberCheck.rows[0].status !== 'accepted') {
+        return res.status(403).json({ error: 'Access denied to this channel' });
+      }
+
+      const result = await pool.query(
+        'SELECT m.*, u.username as sender_username, u.avatar_url as sender_avatar FROM messages m JOIN users u ON m.sender_id = u.id WHERE m.group_id = $1 ORDER BY m.created_at ASC',
+        [req.params.id]
+      );
+      res.json(result.rows);
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  app.get('/api/groups/:id', authenticate, async (req: any, res) => {
+    try {
+      // Access check
+      const memberStatusRes = await pool.query(
+        'SELECT status FROM group_members WHERE group_id = $1 AND user_id = $2',
+        [req.params.id, req.userId]
+      );
+      if (memberStatusRes.rows.length === 0) {
+        return res.status(403).json({ error: 'Not a member of this channel' });
+      }
+
+      const groupRes = await pool.query('SELECT * FROM groups WHERE id = $1', [req.params.id]);
+      if (groupRes.rows.length === 0) return res.status(404).json({ error: 'Group not found' });
+      
+      const membersRes = await pool.query(
+        'SELECT u.id, u.username, u.avatar_url, gm.status, gm.role FROM group_members gm JOIN users u ON gm.user_id = u.id WHERE gm.group_id = $1',
+        [req.params.id]
+      );
+      
+      res.json({ 
+        ...groupRes.rows[0], 
+        members: membersRes.rows,
+        status: memberStatusRes.rows[0].status,
+        role: memberStatusRes.rows[0].role
+      });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  app.post('/api/groups/:id/invite', authenticate, async (req: any, res) => {
+    const { userIds } = req.body;
+    try {
+      for (const uId of userIds) {
+        await pool.query('INSERT INTO group_members (group_id, user_id, status) VALUES ($1, $2, \'pending\') ON CONFLICT DO NOTHING', [req.params.id, uId]);
+      }
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  app.post('/api/groups/:id/accept', authenticate, async (req: any, res) => {
+    try {
+      await pool.query(
+        'UPDATE group_members SET status = \'accepted\' WHERE group_id = $1 AND user_id = $2',
+        [req.params.id, req.userId]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  app.post('/api/groups/:id/decline', authenticate, async (req: any, res) => {
+    try {
+      await pool.query(
+        'DELETE FROM group_members WHERE group_id = $1 AND user_id = $2',
+        [req.params.id, req.userId]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  app.delete('/api/groups/:id/members/:userId', authenticate, async (req: any, res) => {
+    try {
+      // Check if requester is admin
+      const adminCheck = await pool.query('SELECT role FROM group_members WHERE group_id = $1 AND user_id = $2', [req.params.id, req.userId]);
+      if (adminCheck.rows.length === 0 || adminCheck.rows[0].role !== 'admin') {
+        return res.status(403).json({ error: 'Permission denied' });
+      }
+
+      await pool.query(
+        'DELETE FROM group_members WHERE group_id = $1 AND user_id = $2',
+        [req.params.id, req.params.userId]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  app.patch('/api/groups/:id/members/:userId/role', authenticate, async (req: any, res) => {
+    const { role } = req.body;
+    try {
+      // Check if requester is admin
+      const adminCheck = await pool.query('SELECT role FROM group_members WHERE group_id = $1 AND user_id = $2', [req.params.id, req.userId]);
+      if (adminCheck.rows.length === 0 || adminCheck.rows[0].role !== 'admin') {
+        return res.status(403).json({ error: 'Permission denied' });
+      }
+
+      await pool.query(
+        'UPDATE group_members SET role = $1 WHERE group_id = $2 AND user_id = $3',
+        [role, req.params.id, req.params.userId]
+      );
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
   // Chats & Messages
   app.delete('/api/messages/:otherUserId', authenticate, async (req: any, res) => {
     try {
@@ -300,25 +484,82 @@ async function startServer() {
 
   app.get('/api/chats', authenticate, async (req: any, res) => {
     try {
-      // Complex query to get user list with last message
-      const result = await pool.query(`
+      // Get DMs
+      const dmResult = await pool.query(`
         WITH LastMessages AS (
           SELECT 
             CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END as other_user_id,
             content,
+            type,
             created_at,
             ROW_NUMBER() OVER(PARTITION BY CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END ORDER BY created_at DESC) as rn
           FROM messages
-          WHERE sender_id = $1 OR receiver_id = $1
+          WHERE (sender_id = $1 OR receiver_id = $1) AND group_id IS NULL
+        ),
+        UnreadCounts AS (
+          SELECT sender_id, COUNT(*) as count
+          FROM messages
+          WHERE receiver_id = $1 AND is_read = false AND group_id IS NULL
+          GROUP BY sender_id
         )
-        SELECT u.id, u.username, u.avatar_url, lm.content as last_message, lm.created_at as last_message_at
+        SELECT 
+          u.id, 
+          u.username, 
+          u.avatar_url, 
+          lm.content as last_message, 
+          lm.created_at as last_message_at, 
+          'dm' as chat_type,
+          COALESCE(uc.count, 0) as unread_count
         FROM LastMessages lm
         JOIN users u ON lm.other_user_id = u.id
+        LEFT JOIN UnreadCounts uc ON u.id = uc.sender_id
         WHERE lm.rn = 1
-        ORDER BY lm.created_at DESC
       `, [req.userId]);
-      res.json(result.rows);
+
+      // Get Group Chats
+      const groupResult = await pool.query(`
+        WITH LastMessages AS (
+          SELECT 
+            group_id,
+            content,
+            type,
+            created_at,
+            ROW_NUMBER() OVER(PARTITION BY group_id ORDER BY created_at DESC) as rn
+          FROM messages
+          WHERE group_id IN (SELECT group_id FROM group_members WHERE user_id = $1)
+        ),
+        UnreadCounts AS (
+          SELECT group_id, COUNT(*) as count
+          FROM messages
+          WHERE group_id IN (SELECT group_id FROM group_members WHERE user_id = $1)
+            AND sender_id != $1 AND is_read = false
+          GROUP BY group_id
+        )
+        SELECT 
+          g.id, 
+          g.name as username, 
+          g.avatar_url, 
+          lm.content as last_message, 
+          lm.created_at as last_message_at, 
+          'group' as chat_type, 
+          gm.status,
+          COALESCE(uc.count, 0) as unread_count
+        FROM groups g
+        JOIN group_members gm ON g.id = gm.group_id
+        LEFT JOIN LastMessages lm ON g.id = lm.group_id AND lm.rn = 1
+        LEFT JOIN UnreadCounts uc ON g.id = uc.group_id
+        WHERE gm.user_id = $1
+      `, [req.userId]);
+
+      const allChats = [...dmResult.rows, ...groupResult.rows].sort((a, b) => {
+        const dateA = a.last_message_at ? new Date(a.last_message_at).getTime() : 0;
+        const dateB = b.last_message_at ? new Date(b.last_message_at).getTime() : 0;
+        return dateB - dateA;
+      });
+
+      res.json(allChats);
     } catch (err) {
+      console.error('CHAT_FETCH_ERROR:', err);
       res.status(500).json({ error: 'Server error' });
     }
   });
@@ -336,6 +577,23 @@ async function startServer() {
     }
   });
 
+  app.post('/api/messages/mark-read', authenticate, async (req: any, res) => {
+    const { otherUserId, groupId } = req.body;
+    try {
+      if (groupId) {
+        await pool.query('UPDATE messages SET is_read = true WHERE group_id = $1 AND sender_id != $2', [groupId, req.userId]);
+        io.to(`user_${req.userId}`).emit('messages_read', { groupId });
+      } else if (otherUserId) {
+        await pool.query('UPDATE messages SET is_read = true WHERE sender_id = $1 AND receiver_id = $2', [otherUserId, req.userId]);
+        io.to(`user_${req.userId}`).emit('messages_read', { otherUserId });
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error('MARK_READ_ERROR:', err);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // Socket.io logic
   io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
@@ -344,18 +602,40 @@ async function startServer() {
       socket.join(`user_${userId}`);
     });
 
+    socket.on('join_group', (groupId) => {
+      socket.join(`group_${groupId}`);
+    });
+
     socket.on('send_message', async (data) => {
-      const { senderId, receiverId, content, type } = data;
+      const { senderId, receiverId, groupId, content, type } = data;
       try {
         const result = await pool.query(
-          'INSERT INTO messages (sender_id, receiver_id, content, type) VALUES ($1, $2, $3, $4) RETURNING *',
-          [senderId, receiverId, content, type || 'text']
+          'INSERT INTO messages (sender_id, receiver_id, group_id, content, type) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+          [senderId, groupId ? null : receiverId, groupId || null, content, type || 'text']
         );
         const message = result.rows[0];
-        io.to(`user_${receiverId}`).emit('receive_message', message);
-        socket.emit('message_sent', message);
+
+        const userResult = await pool.query('SELECT username, avatar_url FROM users WHERE id = $1', [senderId]);
+        const messageWithUser = { 
+          ...message, 
+          sender_username: userResult.rows[0].username,
+          sender_avatar: userResult.rows[0].avatar_url
+        };
+
+        if (groupId) {
+          // Additional membership verification before broadcast
+          const memberCheck = await pool.query('SELECT status FROM group_members WHERE group_id = $1 AND user_id = $2', [groupId, senderId]);
+          if (memberCheck.rows.length === 0 || memberCheck.rows[0].status !== 'accepted') return;
+
+          // socket.to excludes the sender - preventing the duplicate "mirroring" reported
+          socket.to(`group_${groupId}`).emit('receive_message', messageWithUser);
+          socket.emit('message_sent', messageWithUser);
+        } else {
+          io.to(`user_${receiverId}`).emit('receive_message', messageWithUser);
+          socket.emit('message_sent', messageWithUser);
+        }
       } catch (err) {
-        console.error('Error saving message:', err);
+        console.error('Socket send_message error:', err);
       }
     });
 

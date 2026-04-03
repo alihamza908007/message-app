@@ -1,20 +1,26 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
-import { ArrowLeft, Search, MoreVertical, Terminal, Download, Play, Mic, Smile, Paperclip, Image as ImageIcon, Gift, Send, Plus, Loader2, X, User as UserIcon, Trash2 } from 'lucide-react';
+import { ArrowLeft, Search, MoreVertical, Terminal, Download, Play, Mic, Smile, Paperclip, Image as ImageIcon, Send, Plus, Loader2, X, User as UserIcon, Trash2, Users, UserPlus } from 'lucide-react';
 import { User, Message } from '../types';
 import { io, Socket } from 'socket.io-client';
 import AudioPlayer from './AudioPlayer';
 import EmojiPicker, { Theme, EmojiClickData } from 'emoji-picker-react';
+import GroupInfoModal from './GroupInfoModal';
+import InviteModal from './InviteModal';
 
 interface ChatThreadProps {
   user: User;
+  onEnterChat?: (id: string) => void;
+  onRefreshUnread?: () => void;
 }
 
-export default function ChatThread({ user }: ChatThreadProps) {
+export default function ChatThread({ user, onEnterChat, onRefreshUnread }: ChatThreadProps) {
   const { id } = useParams();
   const navigate = useNavigate();
-  const [otherUser, setOtherUser] = useState<User | null>(null);
+  const isGroup = window.location.pathname.startsWith('/group/');
+
+  const [otherUser, setOtherUser] = useState<any>(null); // Can be User or Group
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(true);
@@ -22,24 +28,27 @@ export default function ChatThread({ user }: ChatThreadProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
-  
+
   const [uploading, setUploading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
 
   const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = useState(false);
+  const [isGroupInfoOpen, setIsGroupInfoOpen] = useState(false);
+  const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
-  
+
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const emojiMenuRef = useRef<HTMLDivElement>(null);
   const attachmentMenuRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   // Close menus when clicking outside
   useEffect(() => {
@@ -50,6 +59,9 @@ export default function ChatThread({ user }: ChatThreadProps) {
       if (attachmentMenuRef.current && !attachmentMenuRef.current.contains(e.target as Node)) {
         setIsAttachmentMenuOpen(false);
       }
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setIsMenuOpen(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -57,15 +69,28 @@ export default function ChatThread({ user }: ChatThreadProps) {
 
   const filteredMessages = messages.filter(m => m.content.toLowerCase().includes(searchQuery.toLowerCase()));
 
+  const refetchGroup = async () => {
+    try {
+      const res = await fetch(isGroup ? `/api/groups/${id}` : `/api/users/${id}`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('neon_token')}` }
+      });
+      if (res.ok) {
+        const u = await res.json();
+        setOtherUser(isGroup ? { ...u, username: u.name } : u);
+      }
+    } catch (err) { console.error(err); }
+  };
+
   const purgeChat = async () => {
     if (!confirm('Are you sure you want to permanently purge this transmission log?')) return;
     try {
-      const res = await fetch(`/api/messages/${id}`, {
+      const res = await fetch(isGroup ? `/api/groups/${id}/messages` : `/api/messages/${id}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${localStorage.getItem('neon_token')}` }
       });
       if (res.ok) {
-        navigate('/chats');
+        setMessages([]);
+        setIsMenuOpen(false);
       }
     } catch (err) { console.error(err); }
   };
@@ -85,25 +110,30 @@ export default function ChatThread({ user }: ChatThreadProps) {
       if (res.ok) {
         const { url } = await res.json();
         socketRef.current?.emit('send_message', {
-          senderId: user.id, receiverId: Number(id), content: url, type
+          senderId: user.id,
+          receiverId: isGroup ? null : Number(id),
+          groupId: isGroup ? Number(id) : null,
+          content: url,
+          type
         });
       }
     } catch (err) { console.error(err); }
-    finally { 
+    finally {
       setUploading(false);
       if (e.target) e.target.value = '';
     }
   };
 
   const startRecording = async () => {
+    if (isGroup && otherUser?.status === 'pending') return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
-      
+
       mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
-      
+
       mediaRecorder.onstop = async () => {
         const activeMimeType = mediaRecorder.mimeType || 'audio/webm';
         const fileExt = activeMimeType.includes('mp4') ? 'mp4' : 'webm';
@@ -120,14 +150,18 @@ export default function ChatThread({ user }: ChatThreadProps) {
           if (res.ok) {
             const { url } = await res.json();
             socketRef.current?.emit('send_message', {
-              senderId: user.id, receiverId: Number(id), content: url, type: 'voice'
+              senderId: user.id,
+              receiverId: isGroup ? null : Number(id),
+              groupId: isGroup ? Number(id) : null,
+              content: url,
+              type: 'voice'
             });
           }
         } catch (err) { console.error(err); }
         finally { setUploading(false); }
         stream.getTracks().forEach(track => track.stop());
       };
-      
+
       mediaRecorder.start();
       setIsRecording(true);
       setRecordingTime(0);
@@ -149,58 +183,87 @@ export default function ChatThread({ user }: ChatThreadProps) {
 
   const isOnlyEmoji = (str: string) => {
     if (!str || !str.trim()) return false;
-    // Regular expression to match emojis (basic implementation)
     const emojiRegex = /^(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff]|[ \t\n\r])*$/;
     const match = str.match(/(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])/g);
-    // If it's only emojis and we have between 1 and 3 emojis, make them big
     return emojiRegex.test(str) && match && match.length <= 3;
+  };
+
+  const markRead = async () => {
+    try {
+      await fetch('/api/messages/mark-read', {
+        method: 'POST',
+        headers: { 
+          'Authorization': `Bearer ${localStorage.getItem('neon_token')}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ 
+          otherUserId: isGroup ? null : Number(id),
+          groupId: isGroup ? Number(id) : null
+        })
+      });
+      if (onRefreshUnread) onRefreshUnread();
+    } catch (err) { console.error(err); }
   };
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const token = localStorage.getItem('neon_token');
+        setLoading(true);
         const [userRes, msgRes] = await Promise.all([
-          fetch(`/api/users/${id}`, { headers: { 'Authorization': `Bearer ${token}` } }),
-          fetch(`/api/messages/${id}`, { headers: { 'Authorization': `Bearer ${token}` } })
+          fetch(isGroup ? `/api/groups/${id}` : `/api/users/${id}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('neon_token')}` }
+          }),
+          fetch(isGroup ? `/api/groups/${id}/messages` : `/api/messages/${id}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('neon_token')}` }
+          })
         ]);
-        
-        if (userRes.ok) setOtherUser(await userRes.json());
+        if (userRes.ok) {
+          const u = await userRes.json();
+          setOtherUser(isGroup ? { ...u, username: u.name } : u);
+        } else if (userRes.status === 403) {
+          navigate('/chats');
+        }
         if (msgRes.ok) setMessages(await msgRes.json());
       } catch (err) {
-        console.error('Error fetching chat data:', err);
+        console.error(err);
       } finally {
         setLoading(false);
       }
     };
-
     fetchData();
+    if (onEnterChat && id) onEnterChat(id);
+    markRead();
+  }, [id, isGroup, navigate, onEnterChat]);
 
-    socketRef.current = io();
+  useEffect(() => {
+    socketRef.current = io(window.location.origin.replace('5173', '3000'), {
+      transports: ['websocket']
+    });
+
     socketRef.current.emit('join', user.id);
+    if (isGroup) {
+      socketRef.current.emit('join_group', Number(id));
+    }
 
     socketRef.current.on('receive_message', (message: Message) => {
-      if (message.sender_id === Number(id) || message.receiver_id === Number(id)) {
-        setMessages(prev => {
-          if (prev.some(m => m.id === message.id)) return prev;
-          return [...prev, message];
-        });
+      const isRelevant = isGroup
+        ? message.group_id === Number(id)
+        : (message.sender_id === Number(id) && !message.group_id);
+
+      if (isRelevant) {
+        setMessages(prev => [...prev, message]);
+        markRead();
       }
     });
 
     socketRef.current.on('message_sent', (message: Message) => {
-      if (message.receiver_id === Number(id)) {
-        setMessages(prev => {
-          if (prev.some(m => m.id === message.id)) return prev;
-          return [...prev, message];
-        });
-      }
+      setMessages(prev => [...prev, message]);
     });
 
     return () => {
       socketRef.current?.disconnect();
     };
-  }, [id, user.id]);
+  }, [id, user.id, isGroup]);
 
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -208,11 +271,13 @@ export default function ChatThread({ user }: ChatThreadProps) {
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim()) return;
+    if (!input.trim() || !socketRef.current) return;
+    if (isGroup && otherUser?.status === 'pending') return;
 
-    socketRef.current?.emit('send_message', {
+    socketRef.current.emit('send_message', {
       senderId: user.id,
-      receiverId: Number(id),
+      receiverId: isGroup ? null : Number(id),
+      groupId: isGroup ? Number(id) : null,
       content: input,
       type: 'text'
     });
@@ -234,44 +299,83 @@ export default function ChatThread({ user }: ChatThreadProps) {
           <button onClick={() => navigate(-1)} className="text-white/60 hover:text-neon-cyan transition-all">
             <ArrowLeft size={20} />
           </button>
-          <div className="relative">
-            <div className="w-10 h-10 rounded-full border border-neon-pink/50 overflow-hidden shadow-[0_0_8px_rgba(255,45,120,0.4)]">
-              <img src={otherUser?.avatar_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${otherUser?.username}`} alt="Avatar" className="w-full h-full object-cover" />
+
+          <div
+            className={`flex items-center gap-3 ${isGroup ? 'cursor-pointer group/header' : ''}`}
+            onClick={() => isGroup && setIsGroupInfoOpen(true)}
+          >
+            <div className={`w-12 h-12 rounded-xl border border-white/10 overflow-hidden relative transition-all ${isGroup ? 'border-neon-pink/50 group-hover/header:border-neon-pink shadow-[0_0_10px_rgba(255,45,120,0.2)]' : ''}`}>
+              <img
+                src={otherUser?.avatar_url || (isGroup ? `https://api.dicebear.com/7.x/identicon/svg?seed=${otherUser?.username}` : `https://api.dicebear.com/7.x/avataaars/svg?seed=${otherUser?.username}`)}
+                alt={otherUser?.username}
+                className={`w-full h-full object-cover transition-transform ${isGroup ? 'group-hover/header:scale-110' : ''}`}
+              />
+              {isGroup && (
+                <div className="absolute top-0 right-0 bg-neon-pink text-[8px] p-0.5 text-white">
+                  <Users size={8} />
+                </div>
+              )}
             </div>
-            <div className="absolute bottom-0 right-0 w-3 h-3 bg-neon-cyan rounded-full border-2 border-neon-bg shadow-[0_0_6px_rgba(0,255,204,1)]"></div>
-          </div>
-          <div>
-            <h1 className="text-lg font-black text-neon-pink neon-glow-pink font-headline tracking-tighter leading-none">{otherUser?.username}</h1>
-            <p className="font-label text-[9px] uppercase tracking-[0.2em] text-neon-cyan neon-glow-cyan mt-1">Uplink_Secured</p>
+            <div>
+              <h1 className={`text-lg font-black text-white font-headline tracking-tighter leading-none flex items-center gap-2 transition-colors ${isGroup ? 'group-hover/header:text-neon-pink' : ''}`}>
+                {otherUser?.username || 'SYNCHRONIZING...'}
+                {isGroup && <span className="bg-neon-pink/20 text-neon-pink text-[8px] px-1 rounded border border-neon-pink/30 uppercase tracking-widest hidden sm:inline">Channel</span>}
+              </h1>
+              <div className="flex items-center gap-2 mt-1">
+                <span className={`w-1.5 h-1.5 rounded-full ${isGroup ? 'bg-neon-pink shadow-[0_0_8px_rgba(255,45,120,0.8)]' : 'bg-neon-cyan shadow-[0_0_8px_rgba(0,255,204,0.8)]'} animate-pulse`} />
+                <p className="font-label text-[9px] uppercase tracking-[0.2em] text-white/40">
+                  {isGroup ? `${otherUser?.members?.length || 0} Entities Connected` : 'Direct_Link_Active'}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
+
         <div className="flex items-center gap-6 relative">
           <button onClick={() => setIsSearchOpen(!isSearchOpen)} className={`transition-all ${isSearchOpen ? 'text-neon-cyan' : 'text-white/40 hover:text-white'}`}>
             <Search size={20} />
           </button>
-          <div className="relative">
+
+          <div className="relative" ref={menuRef}>
             <button onClick={() => setIsMenuOpen(!isMenuOpen)} className={`transition-all ${isMenuOpen ? 'text-neon-pink' : 'text-white/40 hover:text-white'}`}>
               <MoreVertical size={20} />
             </button>
             <AnimatePresence>
               {isMenuOpen && (
                 <motion.div
-                  initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                  className="absolute right-0 top-full mt-4 w-56 bg-neon-bg/95 backdrop-blur-xl border border-neon-pink/30 rounded-xl shadow-[0_0_20px_rgba(255,45,120,0.2)] overflow-hidden flex flex-col z-50 origin-top-right"
+                  initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                  className="absolute top-full right-0 mt-4 w-56 bg-neon-bg/95 backdrop-blur-xl border border-neon-pink/30 rounded-xl overflow-hidden shadow-[0_0_20px_rgba(255,45,120,0.2)] z-50 origin-top-right"
                 >
-                  <button 
-                    onClick={() => { setIsProfileModalOpen(true); setIsMenuOpen(false); }} 
-                    className="flex items-center gap-3 px-4 py-3 text-white/80 hover:text-neon-cyan hover:bg-neon-cyan/10 transition-colors border-b border-white/5 font-headline text-sm"
+                  {isGroup ? (
+                    <>
+                      <button
+                        onClick={() => { setIsGroupInfoOpen(true); setIsMenuOpen(false); }}
+                        className="w-full flex items-center gap-3 px-4 py-4 text-white/60 hover:text-neon-cyan hover:bg-neon-cyan/5 transition-all font-label text-[10px] uppercase tracking-widest border-b border-white/5"
+                      >
+                        <Users size={16} /> Channel Information
+                      </button>
+                      <button
+                        onClick={() => { setIsInviteModalOpen(true); setIsMenuOpen(false); }}
+                        className="w-full flex items-center gap-3 px-4 py-4 text-white/60 hover:text-neon-cyan hover:bg-neon-cyan/5 transition-all font-label text-[10px] uppercase tracking-widest border-b border-white/5"
+                      >
+                        <UserPlus size={16} /> Invite Entities
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => { setIsProfileModalOpen(true); setIsMenuOpen(false); }}
+                      className="w-full flex items-center gap-3 px-4 py-4 text-white/60 hover:text-neon-cyan hover:bg-neon-cyan/5 transition-all font-label text-[10px] uppercase tracking-widest border-b border-white/5"
+                    >
+                      <UserIcon size={16} /> Entity Identity
+                    </button>
+                  )}
+                  <button
+                    onClick={() => { purgeChat(); setIsMenuOpen(false); }}
+                    className="w-full flex items-center gap-3 px-4 py-4 text-white/60 hover:text-neon-pink hover:bg-neon-pink/5 transition-all font-label text-[10px] uppercase tracking-widest"
                   >
-                    <UserIcon size={16} /> View Entity Identity
-                  </button>
-                  <button 
-                    onClick={() => { purgeChat(); setIsMenuOpen(false); }} 
-                    className="flex items-center gap-3 px-4 py-3 text-neon-pink/80 hover:text-white hover:bg-neon-pink transition-colors font-headline text-sm"
-                  >
-                    <Trash2 size={16} /> Purge Local Log
+                    <Trash2 size={16} /> Purge Transmissions
                   </button>
                 </motion.div>
               )}
@@ -282,15 +386,15 @@ export default function ChatThread({ user }: ChatThreadProps) {
 
       <AnimatePresence>
         {isSearchOpen && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
             className="fixed top-[72px] w-full z-30 bg-neon-bg/90 backdrop-blur-md border-b border-neon-cyan/30 flex items-center px-6 py-3 shadow-[0_4px_20px_rgba(0,255,204,0.1)]"
           >
             <Search size={16} className="text-neon-cyan mr-3 shrink-0" />
-            <input 
-              type="text" 
+            <input
+              type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="FILTER_TRANSMISSIONS..."
@@ -304,66 +408,41 @@ export default function ChatThread({ user }: ChatThreadProps) {
         )}
       </AnimatePresence>
 
-      <AnimatePresence>
-        {isProfileModalOpen && (
-          <motion.div 
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
-          >
-            <motion.div 
-              initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
-              className="bg-neon-bg border border-neon-cyan/30 rounded-2xl w-full max-w-sm overflow-hidden flex flex-col items-center p-8 relative shadow-[0_0_30px_rgba(0,255,204,0.15)]"
-            >
-              <button 
-                onClick={() => setIsProfileModalOpen(false)}
-                className="absolute top-4 right-4 text-white/40 hover:text-neon-pink transition-colors"
-              >
-                <X size={20} />
-              </button>
-              
-              <div className="w-24 h-24 rounded-full border border-neon-cyan overflow-hidden shadow-[0_0_15px_rgba(0,255,204,0.3)] mb-4">
-                <img src={otherUser?.avatar_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${otherUser?.username}`} alt="Avatar" className="w-full h-full object-cover" />
-              </div>
-              <h2 className="font-headline font-black text-2xl text-white mb-1">{otherUser?.username}</h2>
-              <p className="font-label text-xs uppercase tracking-widest text-white/40 mb-6 bg-white/5 px-3 py-1 rounded-full border border-white/10">Entity_ID: {otherUser?.id}</p>
-              
-              <div className="w-full space-y-3">
-                <div className="flex justify-between items-center p-3 border border-white/5 rounded-lg bg-white/5">
-                  <span className="font-label text-[10px] uppercase text-white/50 tracking-widest">Status</span>
-                  <span className="font-label text-[10px] uppercase text-neon-cyan tracking-widest">Active_Node</span>
-                </div>
-                <div className="flex justify-between items-center p-3 border border-white/5 rounded-lg bg-white/5">
-                  <span className="font-label text-[10px] uppercase text-white/50 tracking-widest">Packets</span>
-                  <span className="font-label text-[10px] uppercase text-white tracking-widest">{messages.length}</span>
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <main className="grow pt-24 pb-32 px-4 md:max-w-3xl md:mx-auto w-full space-y-4 overflow-y-auto">
-        <div className="flex justify-center mb-8">
-          <span className="font-label text-[9px] uppercase tracking-[0.3em] text-white/20 bg-white/5 px-4 py-1.5 rounded-full border border-white/5">
-            Transmission_Protocol: E2E_AES_256
-          </span>
-        </div>
-
-        {messages.length === 0 && (
-            <div className="py-20 text-center opacity-20">
-                <Terminal className="mx-auto mb-4" />
-                <p className="font-label text-xs uppercase tracking-widest">Awaiting first data packet...</p>
-            </div>
+      <main className="grow pt-24 pb-32 px-4 md:max-w-3xl md:mx-auto w-full space-y-4 overflow-y-auto custom-scrollbar">
+        {messages.length === 0 && !loading && (
+          <div className="py-20 text-center opacity-20">
+            <Terminal className="mx-auto mb-4" />
+            <p className="font-label text-xs uppercase tracking-widest">Awaiting first data packet...</p>
+          </div>
         )}
 
         {filteredMessages.map((msg, i) => (
-          <motion.div 
+          <motion.div
             key={msg.id || i}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
+            initial={{ opacity: 0, y: 10, scale: 0.95 }}
+            animate={{ 
+              opacity: 1, 
+              y: 0, 
+              scale: 1,
+              backgroundColor: i === messages.length - 1 && msg.sender_id !== user.id ? ["rgba(255,255,255,0)", "rgba(0,255,204,0.1)", "rgba(255,255,255,0)"] : undefined
+            }}
+            transition={{ 
+              duration: 0.3,
+              backgroundColor: { duration: 1.5, repeat: 0 }
+            }}
             className={`flex flex-col gap-1.5 max-w-[85%] ${msg.sender_id === user.id ? 'items-end ml-auto' : 'items-start'}`}
           >
-            <div className={`p-4 rounded-xl ${msg.sender_id === user.id ? 'bg-neon-pink/10 rounded-br-none border border-neon-pink/30' : 'bg-white/5 rounded-bl-none border border-white/10'}`}>
+            {isGroup && msg.sender_id !== user.id && (
+              <div className="flex items-center gap-2 mb-0.5 ml-1">
+                <img
+                  src={msg.sender_avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${msg.sender_username}`}
+                  alt={msg.sender_username}
+                  className="w-4 h-4 rounded-full border border-white/20"
+                />
+                <span className="font-label text-[9px] uppercase tracking-widest text-neon-pink/80">{msg.sender_username}</span>
+              </div>
+            )}
+            <div className={`p-4 rounded-xl ${msg.sender_id === user.id ? 'bg-neon-pink/10 rounded-br-none border border-neon-pink/30 shadow-[0_0_20px_rgba(255,45,120,0.05)]' : 'bg-white/5 rounded-bl-none border border-white/10'}`}>
               {msg.type === 'image' ? (
                 <img src={msg.content} alt="Transmission" className="max-w-[250px] w-full rounded-lg border border-white/10 shadow-[0_0_15px_rgba(255,255,255,0.05)]" />
               ) : msg.type === 'file' ? (
@@ -374,7 +453,7 @@ export default function ChatThread({ user }: ChatThreadProps) {
               ) : msg.type === 'voice' ? (
                 <AudioPlayer src={msg.content} />
               ) : (
-                <p className={`${isOnlyEmoji(msg.content) ? 'text-4xl py-2' : 'text-sm leading-relaxed'} text-white selection:bg-neon-cyan selection:text-neon-bg transition-all`}>
+                <p className={`${isOnlyEmoji(msg.content) ? 'text-4xl py-2' : 'text-sm leading-relaxed'} text-white selection:bg-neon-cyan selection:text-neon-bg`}>
                   {msg.content}
                 </p>
               )}
@@ -393,10 +472,11 @@ export default function ChatThread({ user }: ChatThreadProps) {
           <input type="file" ref={fileInputRef} className="hidden" accept="*/*" onChange={(e) => handleFileUpload(e, 'file')} />
 
           <div className="relative" ref={attachmentMenuRef}>
-            <button 
-              type="button" 
+            <button
+              type="button"
               onClick={() => setIsAttachmentMenuOpen(!isAttachmentMenuOpen)}
-              className={`p-2 transition-all mb-1 hidden sm:block ${isAttachmentMenuOpen ? 'text-neon-pink rotate-45' : 'text-white/40 hover:text-neon-cyan'}`}
+              disabled={isGroup && otherUser?.status === 'pending'}
+              className={`p-2 transition-all mb-1 hidden sm:block ${isAttachmentMenuOpen ? 'text-neon-pink rotate-45' : 'text-white/40 hover:text-neon-cyan'} disabled:opacity-20`}
             >
               <Plus size={24} />
             </button>
@@ -408,14 +488,14 @@ export default function ChatThread({ user }: ChatThreadProps) {
                   exit={{ opacity: 0, scale: 0.9, y: 10 }}
                   className="absolute bottom-full left-0 mb-4 w-48 bg-neon-bg/95 backdrop-blur-xl border border-neon-pink/30 rounded-xl overflow-hidden shadow-[0_0_20px_rgba(255,45,120,0.2)]"
                 >
-                  <button 
+                  <button
                     type="button"
                     onClick={() => { imageInputRef.current?.click(); setIsAttachmentMenuOpen(false); }}
                     className="w-full flex items-center gap-3 px-4 py-3 text-white/80 hover:text-neon-cyan hover:bg-neon-cyan/10 transition-colors border-b border-white/5 font-label text-xs uppercase"
                   >
                     <ImageIcon size={18} /> Upload Image
                   </button>
-                  <button 
+                  <button
                     type="button"
                     onClick={() => { fileInputRef.current?.click(); setIsAttachmentMenuOpen(false); }}
                     className="w-full flex items-center gap-3 px-4 py-3 text-white/80 hover:text-neon-cyan hover:bg-neon-cyan/10 transition-colors font-label text-xs uppercase"
@@ -426,11 +506,11 @@ export default function ChatThread({ user }: ChatThreadProps) {
               )}
             </AnimatePresence>
           </div>
-          
-          <div className={`grow flex items-end px-3 py-2 rounded-xl border transition-all ${isRecording ? 'bg-red-500/10 border-red-500/50 shadow-[inset_0_0_15px_rgba(239,68,68,0.2)]' : 'bg-white/5 border-white/10 focus-within:border-neon-pink/50 focus-within:shadow-[0_0_20px_rgba(255,45,120,0.1)]'}`}>
+
+          <div className={`grow flex items-end px-3 py-2 rounded-xl border transition-all ${isRecording ? 'bg-red-500/10 border-red-500/50 shadow-[inset_0_0_15px_rgba(239,68,68,0.2)]' : 'bg-white/5 border-white/10 focus-within:border-neon-pink/50 focus-within:shadow-[0_0_20px_rgba(255,45,120,0.1)]'} ${isGroup && otherUser?.status === 'pending' ? 'opacity-30 pointer-events-none' : ''}`}>
             <div className="relative" ref={emojiMenuRef}>
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={() => setIsEmojiPickerOpen(!isEmojiPickerOpen)}
                 className={`p-2 transition-colors hidden sm:block ${isEmojiPickerOpen ? 'text-neon-yellow shadow-[0_0_8px_rgba(255,255,0,0.4)]' : 'text-white/40 hover:text-neon-yellow'}`}
               >
@@ -439,49 +519,102 @@ export default function ChatThread({ user }: ChatThreadProps) {
               <AnimatePresence>
                 {isEmojiPickerOpen && (
                   <div className="absolute bottom-full left-0 mb-4 z-50">
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.9, y: 10 }}
-                      animate={{ opacity: 1, scale: 1, y: 0 }}
-                      exit={{ opacity: 0, scale: 0.9, y: 10 }}
-                      className="shadow-2xl"
-                    >
-                      <EmojiPicker 
-                        onEmojiClick={onEmojiClick}
-                        theme={Theme.DARK}
-                        width={300}
-                        height={400}
-                      />
+                    <motion.div initial={{ opacity: 0, scale: 0.9, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 10 }}>
+                      <EmojiPicker onEmojiClick={onEmojiClick} theme={Theme.DARK} width={300} height={400} />
                     </motion.div>
                   </div>
                 )}
               </AnimatePresence>
             </div>
-            <textarea 
+            <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              disabled={isRecording || uploading}
+              disabled={isRecording || uploading || (isGroup && otherUser?.status === 'pending')}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
                   handleSend(e);
                 }
               }}
-              className="grow bg-transparent border-none focus:ring-0 text-sm text-white py-2 resize-none placeholder:text-white/20 font-body disabled:opacity-50" 
-              placeholder={uploading ? "UPLOADING_DATA..." : isRecording ? `RECORDING AUDIO... ${recordingTime}s` : "Inject pulse..."} 
+              className="grow bg-transparent border-none focus:ring-0 text-sm text-white py-2 resize-none placeholder:text-white/20 font-body disabled:opacity-50"
+              placeholder={isGroup && otherUser?.status === 'pending' ? "VERIFICATION REQUIRED..." : uploading ? "UPLOADING_DATA..." : isRecording ? `RECORDING AUDIO... ${recordingTime}s` : "Inject pulse..."}
               rows={1}
             />
           </div>
 
-          <button 
-            type={input.trim() ? "submit" : "button"}
-            onClick={input.trim() ? undefined : (isRecording ? stopRecording : startRecording)}
-            disabled={uploading}
-            className={`w-12 h-12 rounded-xl border transition-all mb-1 flex items-center justify-center disabled:opacity-50 ${input.trim() ? 'bg-neon-pink/10 border-neon-pink text-neon-pink shadow-[0_0_16px_rgba(255,45,120,0.4)] hover:bg-neon-pink hover:text-white' : isRecording ? 'bg-red-500 text-white border-red-500 shadow-[0_0_16px_rgba(239,68,68,0.6)] animate-pulse' : 'bg-white/5 border-white/10 text-white/20 hover:text-neon-cyan hover:border-neon-cyan/50'}`}
-          >
-            {input.trim() ? <Send size={20} /> : (isRecording ? <Terminal size={20} /> : <Mic size={20} />)}
-          </button>
+          {isGroup && otherUser?.status === 'pending' ? (
+            <button
+              type="button"
+              onClick={async () => {
+                const res = await fetch(`/api/groups/${id}/accept`, {
+                  method: 'POST',
+                  headers: { 'Authorization': `Bearer ${localStorage.getItem('neon_token')}` }
+                });
+                if (res.ok) window.location.reload();
+              }}
+              className="px-6 h-12 rounded-xl bg-neon-cyan/10 border border-neon-cyan text-neon-cyan font-headline font-bold uppercase tracking-widest hover:bg-neon-cyan hover:text-neon-bg transition-all"
+            >
+              Accept
+            </button>
+          ) : (
+            <button
+              type={input.trim() ? "submit" : "button"}
+              onClick={input.trim() ? undefined : (isRecording ? stopRecording : startRecording)}
+              disabled={uploading}
+              className={`w-12 h-12 rounded-xl border transition-all mb-1 flex items-center justify-center disabled:opacity-50 ${input.trim() ? 'bg-neon-pink/10 border-neon-pink text-neon-pink shadow-[0_0_16px_rgba(255,45,120,0.4)] hover:bg-neon-pink hover:text-white' : isRecording ? 'bg-red-500 text-white border-red-500 shadow-[0_0_16px_rgba(239,68,68,0.6)] animate-pulse' : 'bg-white/5 border-white/10 text-white/20 hover:text-neon-cyan hover:border-neon-cyan/50'}`}
+            >
+              {input.trim() ? <Send size={20} /> : (isRecording ? <Terminal size={20} /> : <Mic size={20} />)}
+            </button>
+          )}
         </form>
       </footer>
+
+      {isGroup && otherUser && (
+        <GroupInfoModal
+          isOpen={isGroupInfoOpen}
+          onClose={() => setIsGroupInfoOpen(false)}
+          group={otherUser}
+          onLeave={() => navigate('/chats')}
+          onRefresh={refetchGroup}
+        />
+      )}
+
+      {isGroup && (
+        <InviteModal
+          isOpen={isInviteModalOpen}
+          onClose={() => setIsInviteModalOpen(false)}
+          groupId={Number(id)}
+          currentMembers={otherUser?.members?.map((m: any) => m.id) || []}
+          onInviteSuccess={refetchGroup}
+        />
+      )}
+
+      {!isGroup && otherUser && (
+        <AnimatePresence>
+          {isProfileModalOpen && (
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setIsProfileModalOpen(false)}>
+              <motion.div initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }} onClick={e => e.stopPropagation()} className="bg-neon-bg border border-neon-cyan/30 rounded-2xl w-full max-w-sm overflow-hidden flex flex-col items-center p-8 relative shadow-[0_0_30px_rgba(0,255,204,0.15)]">
+                <button onClick={() => setIsProfileModalOpen(false)} className="absolute top-4 right-4 text-white/40 hover:text-neon-pink transition-colors"><X size={20} /></button>
+                <div className="w-24 h-24 rounded-full border border-neon-cyan overflow-hidden shadow-[0_0_15px_rgba(0,255,204,0.3)] mb-4">
+                  <img src={otherUser?.avatar_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${otherUser?.username}`} alt="Avatar" className="w-full h-full object-cover" />
+                </div>
+                <h2 className="font-headline font-black text-2xl text-white mb-1">{otherUser?.username}</h2>
+                <p className="font-label text-xs uppercase tracking-widest text-white/40 mb-6 bg-white/5 px-3 py-1 rounded-full border border-white/10">Entity_ID: {otherUser?.id}</p>
+                <div className="w-full space-y-3">
+                  <div className="flex justify-between items-center p-3 border border-white/5 rounded-lg bg-white/5">
+                    <span className="font-label text-[10px] uppercase text-white/50 tracking-widest">Status</span>
+                    <span className="font-label text-[10px] uppercase text-neon-cyan tracking-widest">Active_Node</span>
+                  </div>
+                  <div className="flex justify-between items-center p-3 border border-white/5 rounded-lg bg-white/5">
+                    <span className="font-label text-[10px] uppercase text-white/50 tracking-widest">Packets</span>
+                    <span className="font-label text-[10px] uppercase text-white tracking-widest">{messages.length}</span>
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      )}
     </div>
   );
 }
