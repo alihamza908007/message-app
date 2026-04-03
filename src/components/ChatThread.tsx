@@ -5,6 +5,7 @@ import { ArrowLeft, Search, MoreVertical, Terminal, Download, Play, Mic, Smile, 
 import { User, Message } from '../types';
 import { io, Socket } from 'socket.io-client';
 import AudioPlayer from './AudioPlayer';
+import EmojiPicker, { Theme, EmojiClickData } from 'emoji-picker-react';
 
 interface ChatThreadProps {
   user: User;
@@ -26,6 +27,9 @@ export default function ChatThread({ user }: ChatThreadProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
 
+  const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false);
+  const [isEmojiPickerOpen, setIsEmojiPickerOpen] = useState(false);
+
   const socketRef = useRef<Socket | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -34,6 +38,22 @@ export default function ChatThread({ user }: ChatThreadProps) {
   
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const emojiMenuRef = useRef<HTMLDivElement>(null);
+  const attachmentMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close menus when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (emojiMenuRef.current && !emojiMenuRef.current.contains(e.target as Node)) {
+        setIsEmojiPickerOpen(false);
+      }
+      if (attachmentMenuRef.current && !attachmentMenuRef.current.contains(e.target as Node)) {
+        setIsAttachmentMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const filteredMessages = messages.filter(m => m.content.toLowerCase().includes(searchQuery.toLowerCase()));
 
@@ -121,6 +141,19 @@ export default function ChatThread({ user }: ChatThreadProps) {
       setIsRecording(false);
       if (timerRef.current) clearInterval(timerRef.current);
     }
+  };
+
+  const onEmojiClick = (emojiData: EmojiClickData) => {
+    setInput(prev => prev + emojiData.emoji);
+  };
+
+  const isOnlyEmoji = (str: string) => {
+    if (!str || !str.trim()) return false;
+    // Regular expression to match emojis (basic implementation)
+    const emojiRegex = /^(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff]|[ \t\n\r])*$/;
+    const match = str.match(/(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])/g);
+    // If it's only emojis and we have between 1 and 3 emojis, make them big
+    return emojiRegex.test(str) && match && match.length <= 3;
   };
 
   useEffect(() => {
@@ -341,7 +374,9 @@ export default function ChatThread({ user }: ChatThreadProps) {
               ) : msg.type === 'voice' ? (
                 <AudioPlayer src={msg.content} />
               ) : (
-                <p className="text-sm leading-relaxed text-white selection:bg-neon-cyan selection:text-neon-bg">{msg.content}</p>
+                <p className={`${isOnlyEmoji(msg.content) ? 'text-4xl py-2' : 'text-sm leading-relaxed'} text-white selection:bg-neon-cyan selection:text-neon-bg transition-all`}>
+                  {msg.content}
+                </p>
               )}
             </div>
             <span className="font-label text-[8px] text-white/30 uppercase tracking-widest">
@@ -353,18 +388,74 @@ export default function ChatThread({ user }: ChatThreadProps) {
       </main>
 
       <footer className="fixed bottom-0 left-0 w-full z-40 bg-neon-bg/90 backdrop-blur-lg border-t border-neon-pink/20 pb-safe">
-        <form onSubmit={handleSend} className="max-w-4xl mx-auto px-4 py-4 flex items-end gap-3">
+        <form onSubmit={handleSend} className="max-w-4xl mx-auto px-4 py-4 flex items-end gap-3 relative">
           <input type="file" ref={imageInputRef} className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, 'image')} />
           <input type="file" ref={fileInputRef} className="hidden" accept="*/*" onChange={(e) => handleFileUpload(e, 'file')} />
 
-          <button type="button" className="p-2 text-white/40 hover:text-neon-cyan transition-all mb-1 hidden sm:block">
-            <Plus size={24} />
-          </button>
+          <div className="relative" ref={attachmentMenuRef}>
+            <button 
+              type="button" 
+              onClick={() => setIsAttachmentMenuOpen(!isAttachmentMenuOpen)}
+              className={`p-2 transition-all mb-1 hidden sm:block ${isAttachmentMenuOpen ? 'text-neon-pink rotate-45' : 'text-white/40 hover:text-neon-cyan'}`}
+            >
+              <Plus size={24} />
+            </button>
+            <AnimatePresence>
+              {isAttachmentMenuOpen && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                  className="absolute bottom-full left-0 mb-4 w-48 bg-neon-bg/95 backdrop-blur-xl border border-neon-pink/30 rounded-xl overflow-hidden shadow-[0_0_20px_rgba(255,45,120,0.2)]"
+                >
+                  <button 
+                    type="button"
+                    onClick={() => { imageInputRef.current?.click(); setIsAttachmentMenuOpen(false); }}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-white/80 hover:text-neon-cyan hover:bg-neon-cyan/10 transition-colors border-b border-white/5 font-label text-xs uppercase"
+                  >
+                    <ImageIcon size={18} /> Upload Image
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => { fileInputRef.current?.click(); setIsAttachmentMenuOpen(false); }}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-white/80 hover:text-neon-cyan hover:bg-neon-cyan/10 transition-colors font-label text-xs uppercase"
+                  >
+                    <Paperclip size={18} /> Attach File
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
           
           <div className={`grow flex items-end px-3 py-2 rounded-xl border transition-all ${isRecording ? 'bg-red-500/10 border-red-500/50 shadow-[inset_0_0_15px_rgba(239,68,68,0.2)]' : 'bg-white/5 border-white/10 focus-within:border-neon-pink/50 focus-within:shadow-[0_0_20px_rgba(255,45,120,0.1)]'}`}>
-            <button type="button" className="p-2 text-white/40 hover:text-neon-yellow transition-colors hidden sm:block">
-              <Smile size={20} />
-            </button>
+            <div className="relative" ref={emojiMenuRef}>
+              <button 
+                type="button" 
+                onClick={() => setIsEmojiPickerOpen(!isEmojiPickerOpen)}
+                className={`p-2 transition-colors hidden sm:block ${isEmojiPickerOpen ? 'text-neon-yellow shadow-[0_0_8px_rgba(255,255,0,0.4)]' : 'text-white/40 hover:text-neon-yellow'}`}
+              >
+                <Smile size={20} />
+              </button>
+              <AnimatePresence>
+                {isEmojiPickerOpen && (
+                  <div className="absolute bottom-full left-0 mb-4 z-50">
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.9, y: 10 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.9, y: 10 }}
+                      className="shadow-2xl"
+                    >
+                      <EmojiPicker 
+                        onEmojiClick={onEmojiClick}
+                        theme={Theme.DARK}
+                        width={300}
+                        height={400}
+                      />
+                    </motion.div>
+                  </div>
+                )}
+              </AnimatePresence>
+            </div>
             <textarea 
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -379,10 +470,6 @@ export default function ChatThread({ user }: ChatThreadProps) {
               placeholder={uploading ? "UPLOADING_DATA..." : isRecording ? `RECORDING AUDIO... ${recordingTime}s` : "Inject pulse..."} 
               rows={1}
             />
-            <div className="flex items-center gap-1">
-              <button disabled={isRecording || uploading} type="button" onClick={() => fileInputRef.current?.click()} className="p-2 text-white/40 hover:text-neon-cyan transition-colors disabled:opacity-30"><Paperclip size={18} /></button>
-              <button disabled={isRecording || uploading} type="button" onClick={() => imageInputRef.current?.click()} className="p-2 text-white/40 hover:text-neon-cyan transition-colors disabled:opacity-30"><ImageIcon size={18} /></button>
-            </div>
           </div>
 
           <button 
